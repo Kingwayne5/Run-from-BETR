@@ -232,8 +232,10 @@ async function supabaseSelectTop() {
   if (!res.ok) throw new Error("Supabase read failed: " + res.status);
   return await res.json();
 }
-async function supabaseInsert(name, score) {
-  const url = SUPABASE_URL + "/rest/v1/scores";
+async function submitScore(name, score, duration) {
+  // Scores go through the validating Edge Function, NOT straight to the DB.
+  // The function checks score vs. what's possible in `duration` seconds.
+  const url = SUPABASE_URL + "/functions/v1/submit-score";
   const res = await fetch(url, {
     method: "POST",
     headers: {
@@ -241,9 +243,13 @@ async function supabaseInsert(name, score) {
       Authorization: "Bearer " + SUPABASE_KEY,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({ name: name, score: score }),
+    body: JSON.stringify({ name: name, score: score, duration: duration }),
   });
-  if (!res.ok) throw new Error("Supabase write failed: " + res.status);
+  if (!res.ok) {
+    let reason = res.status;
+    try { const j = await res.json(); if (j && j.reason) reason = j.reason; } catch {}
+    throw new Error("Score submission rejected: " + reason);
+  }
 }
 
 // ---- local fallback (works on real websites via localStorage) ----
@@ -275,12 +281,12 @@ async function loadScores() {
     return localLoad();
   }
 }
-async function saveScore(name, score) {
+async function saveScore(name, score, duration) {
   if (!SUPABASE_READY) { console.warn("[BETR] Supabase not configured - saving LOCALLY only."); localSave(name, score); return; }
   try {
-    await supabaseInsert(name, score);
+    await submitScore(name, score, duration);
   } catch (e) {
-    console.warn("[BETR] Supabase write failed, saving LOCALLY instead:", e.message);
+    console.warn("[BETR] Score not accepted by server, saving LOCALLY instead:", e.message);
     localSave(name, score);
   }
 }
@@ -547,6 +553,7 @@ const game = {
     Sound.hit(); Sound.stopAmbient();
     this.spawnParticles(PLAYER_X, s.playerY, C.magenta, 28);
     const sc = Math.floor(s.score);
+    const durationSec = s.frame / 60;   // 60fps game loop -> seconds played
     const start = performance.now();
     const freezeLoop = () => {
       for (const p of s.particles) { p.x += p.vx; p.y += p.vy; p.vy += 0.1; p.life -= 0.03; }
@@ -554,7 +561,7 @@ const game = {
       if (self.shake > 0) self.shake *= 0.85;
       self.draw();
       if (performance.now() - start < 650) requestAnimationFrame(freezeLoop);
-      else saveScore(self.discordId, sc).then(() => {
+      else saveScore(self.discordId, sc, durationSec).then(() => {
         document.getElementById("final-score").textContent = sc;
         document.getElementById("saved-name").textContent = self.discordId;
         document.getElementById("death-cause").textContent = "YOU HIT AN OBSTACLE";
